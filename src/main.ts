@@ -14,11 +14,13 @@ async function bootstrap() {
 
   // Enable CORS
   app.enableCors({
-    origin: process.env.NODE_ENV === 'production'
-      ? [
-          'https://aeras-admin-panel.onrender.com',
-        ]
-      : '*', // Allow all origins in development
+    // origin: process.env.NODE_ENV === 'production'
+    //   ? [
+    //       'https://aeras-admin-panel.onrender.com',
+    //       'https://aeras-admin-panel.onrender.com/'
+    //     ]
+    //   : '*', // Allow all origins in development
+    origin: '*', // Allow all origins
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
   });

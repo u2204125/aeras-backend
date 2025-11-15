@@ -260,8 +260,11 @@ export class RidesService {
     // Broadcast ride status update to admin dashboard
     this.notificationsGateway.broadcastRideStatusUpdate(savedRide);
 
-    // Publish to MQTT topic
-    this.mqttController.publishRideStatus(savedRide.id, savedRide.status);
+    // Publish to MQTT topic with puller information
+    this.mqttController.publishRideStatus(savedRide.id, savedRide.status, {
+      pullerId: puller.id,
+      pullerName: puller.name,
+    });
     console.log(`📡 Published ride ${savedRide.id} status to MQTT: ACCEPTED by puller ${pullerId}`);
 
     return savedRide;

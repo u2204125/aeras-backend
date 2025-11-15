@@ -56,12 +56,19 @@ export class MqttController implements OnModuleInit {
   /**
    * Publish ride status update
    */
-  publishRideStatus(rideId: number, status: string) {
+  publishRideStatus(rideId: number, status: string, additionalData?: any) {
     const topic = `aeras/rides/${rideId}/status`;
 
-    this.client.emit(topic, { rideId, status, timestamp: new Date() }).subscribe({
+    const payload = { 
+      rideId, 
+      status, 
+      timestamp: new Date(),
+      ...additionalData 
+    };
+
+    this.client.emit(topic, payload).subscribe({
       next: () => {
-        console.log(`Published ride status to ${topic}`);
+        console.log(`Published ride status to ${topic}:`, payload);
       },
       error: (err) => {
         console.error(`Error publishing ride status:`, err);
