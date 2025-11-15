@@ -1,0 +1,52 @@
+# Render Blueprint for AERAS Backend
+# This file allows one-click deployment on Render
+
+services:
+  # PostgreSQL Database
+  - type: pserv
+    name: aeras-db
+    plan: free # or 'starter' for production
+    databaseName: aeras_db
+    databaseUser: aeras_user
+    region: oregon # change as needed
+
+  # Backend Web Service
+  - type: web
+    name: aeras-backend
+    runtime: node
+    plan: free # or 'starter' for production
+    region: oregon # change as needed
+    buildCommand: pnpm install && pnpm run build
+    startCommand: pnpm run start:prod
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: DB_HOST
+        fromDatabase:
+          name: aeras-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: aeras-db
+          property: port
+      - key: DB_USERNAME
+        fromDatabase:
+          name: aeras-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: aeras-db
+          property: password
+      - key: DB_DATABASE
+        fromDatabase:
+          name: aeras-db
+          property: database
+      - key: JWT_SECRET
+        generateValue: true # Render will generate a secure random value
+      - key: MQTT_HOST
+        value: mqtt://broker.hivemq.com:1883
+      - key: MQTT_PORT
+        value: 1883
