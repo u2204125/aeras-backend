@@ -226,8 +226,11 @@ export class RidesService {
         timestamp: new Date(),
       };
 
-      // Publish to MQTT topic for specific puller using new method
+      // Publish to MQTT topic for IoT hardware/devices
       this.mqttController.publishRideRequest(puller.id, rideRequest);
+
+      // Also send via WebSocket to puller web app
+      this.notificationsGateway.sendRideRequestToPuller(puller.id, rideRequest);
     });
   }
 
@@ -366,6 +369,9 @@ export class RidesService {
 
     // Publish ride filled notification to MQTT using new method
     this.mqttController.publishRideFilled(ride.id, puller.id, puller.name);
+
+    // Broadcast ride filled to all pullers via WebSocket
+    this.notificationsGateway.broadcastRideFilled(ride.id);
 
     // Broadcast ride status update to admin dashboard
     this.notificationsGateway.broadcastRideStatusUpdate(savedRide);

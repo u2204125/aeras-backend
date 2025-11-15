@@ -49,15 +49,32 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
 
   /**
    * Handle client disconnection
+   * Automatically sets puller as offline when they disconnect
    */
-  handleDisconnect(client: Socket) {
+  async handleDisconnect(client: Socket) {
     console.log(`Client disconnected: ${client.id}`);
     
-    // Remove from connected pullers if it was a puller
+    // Find and remove from connected pullers if it was a puller
     for (const [pullerId, socketId] of this.connectedPullers.entries()) {
       if (socketId === client.id) {
         this.connectedPullers.delete(pullerId);
         console.log(`Puller ${pullerId} disconnected`);
+        
+        // Set puller as offline
+        try {
+          await this.pullersService.setOnlineStatus(pullerId, false);
+          console.log(`✅ Puller ${pullerId} set to offline`);
+          
+          // Publish to MQTT for hardware
+          this.mqttController.publish(`aeras/pullers/${pullerId}/status`, {
+            pullerId,
+            isOnline: false,
+            timestamp: new Date(),
+          });
+        } catch (error) {
+          console.error(`Failed to set puller ${pullerId} offline:`, error);
+        }
+        
         break;
       }
     }
@@ -66,9 +83,10 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
   /**
    * Handle puller registration
    * Called when puller app connects with their ID
+   * Automatically sets puller as online when they connect
    */
   @SubscribeMessage('register_puller')
-  handlePullerRegistration(
+  async handlePullerRegistration(
     @MessageBody() data: { pullerId: number },
     @ConnectedSocket() client: Socket,
   ) {
@@ -76,9 +94,24 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
     this.connectedPullers.set(pullerId, client.id);
     console.log(`✅ Puller ${pullerId} registered with socket ${client.id}`);
     
+    // Automatically set puller as online when they connect
+    try {
+      await this.pullersService.setOnlineStatus(pullerId, true);
+      console.log(`✅ Puller ${pullerId} set to online`);
+      
+      // Publish to MQTT for hardware
+      this.mqttController.publish(`aeras/pullers/${pullerId}/status`, {
+        pullerId,
+        isOnline: true,
+        timestamp: new Date(),
+      });
+    } catch (error) {
+      console.error(`Failed to set puller ${pullerId} online:`, error);
+    }
+    
     return {
       event: 'puller_registered',
-      data: { pullerId, success: true },
+      data: { pullerId, success: true, isOnline: true },
     };
   }
 
@@ -93,6 +126,32 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
     } else {
       console.log(`⚠️  Puller ${pullerId} not connected via WebSocket`);
     }
+  }
+
+  /**
+   * Broadcast new ride request to all connected pullers
+   * Used when a new ride is created and needs to be distributed
+   */
+  broadcastNewRideRequest(rideRequest: any) {
+    this.server.emit('new_ride_request', rideRequest);
+    console.log(`📢 Broadcasted new ride request ${rideRequest.rideId} to all pullers`);
+  }
+
+  /**
+   * Send ride request to specific puller
+   * Used when distributing rides to nearby pullers only
+   */
+  sendRideRequestToPuller(pullerId: number, rideRequest: any) {
+    this.sendToPuller(pullerId, 'new_ride_request', rideRequest);
+  }
+
+  /**
+   * Broadcast ride filled notification
+   * Notifies all pullers that a ride has been accepted
+   */
+  broadcastRideFilled(rideId: number) {
+    this.server.emit('ride_filled', { rideId });
+    console.log(`📢 Broadcasted ride filled notification for ride ${rideId}`);
   }
 
   /**
