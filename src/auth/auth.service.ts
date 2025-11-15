@@ -1,10 +1,11 @@
-import { Injectable, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, NotFoundException, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { Admin } from '../entities/admin.entity';
 import { Puller } from '../entities/puller.entity';
+import { MqttController } from '../notifications/mqtt.controller';
 
 @Injectable()
 export class AuthService {
@@ -14,6 +15,8 @@ export class AuthService {
     @InjectRepository(Puller)
     private pullerRepository: Repository<Puller>,
     private jwtService: JwtService,
+    @Inject(forwardRef(() => MqttController))
+    private mqttController: MqttController,
   ) {}
 
   async validateAdmin(username: string, password: string): Promise<any> {
@@ -80,18 +83,23 @@ export class AuthService {
     // Generate JWT token for puller
     const payload = { phone: puller.phone, sub: puller.id, type: 'puller' };
 
+    const pullerData = {
+      id: puller.id,
+      name: puller.name,
+      phone: puller.phone,
+      pointsBalance: puller.pointsBalance,
+      isOnline: puller.isOnline,
+      isActive: puller.isActive,
+      lastKnownLat: puller.lastKnownLat,
+      lastKnownLon: puller.lastKnownLon,
+    };
+
+    // Publish login data to MQTT for hardware
+    this.mqttController.publishPullerLogin(puller.id, pullerData);
+
     return {
       access_token: this.jwtService.sign(payload),
-      puller: {
-        id: puller.id,
-        name: puller.name,
-        phone: puller.phone,
-        pointsBalance: puller.pointsBalance,
-        isOnline: puller.isOnline,
-        isActive: puller.isActive,
-        lastKnownLat: puller.lastKnownLat,
-        lastKnownLon: puller.lastKnownLon,
-      },
+      puller: pullerData,
     };
   }
 }

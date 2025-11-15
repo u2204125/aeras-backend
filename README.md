@@ -97,6 +97,7 @@ GRANT ALL PRIVILEGES ON DATABASE aeras_db TO aeras_user;
 5. **Seed the database:**
 ```bash
 pnpm run seed
+pnpm run seed:prod # .env.production.local file is required
 ```
 
 ### Running the Application

@@ -32,7 +32,7 @@ export class DatabaseSeeder {
 
     // Clear in proper order to respect foreign key constraints
     await this.dataSource.query(
-      'TRUNCATE TABLE "rides", "points_history", "pullers", "location_blocks", "admins" CASCADE',
+      'TRUNCATE TABLE "rides", "points_history", "riders", "pullers", "location_blocks", "admins" CASCADE',
     );
 
     console.log('✓ Database cleared!');
@@ -83,40 +83,28 @@ export class DatabaseSeeder {
 
     const blocks = [
       {
-        blockId: 'CUET_Pahartoli',
+        blockId: 'Pahartoli',
         destinationName: 'Pahartoli',
-        latitude: 22.4626,
-        longitude: 91.9708,
+        latitude: 22.4725,
+        longitude: 91.9845,
       },
       {
-        blockId: 'CUET_NewMarket',
-        destinationName: 'New Market',
-        latitude: 22.3569,
-        longitude: 91.8325,
+        blockId: 'CUET_Campus',
+        destinationName: 'Campus',
+        latitude: 22.4633,
+        longitude: 91.9714,
       },
       {
-        blockId: 'CUET_GEC',
-        destinationName: 'GEC Circle',
-        latitude: 22.3632,
-        longitude: 91.834,
+        blockId: 'Noapara',
+        destinationName: 'Noapara',
+        latitude: 22.4580,
+        longitude: 91.9920,
       },
       {
-        blockId: 'CUET_Agrabad',
-        destinationName: 'Agrabad',
-        latitude: 22.332,
-        longitude: 91.8136,
-      },
-      {
-        blockId: 'CUET_Muradpur',
-        destinationName: 'Muradpur',
-        latitude: 22.3483,
-        longitude: 91.8166,
-      },
-      {
-        blockId: 'CUET_OxygenMore',
-        destinationName: 'Oxygen More',
-        latitude: 22.3651,
-        longitude: 91.8077,
+        blockId: 'Raojan',
+        destinationName: 'Raojan',
+        latitude: 22.4520,
+        longitude: 91.9650,
       },
     ];
 
@@ -137,7 +125,7 @@ export class DatabaseSeeder {
         name: 'Mohammad Rahman',
         phone: '+8801712345001',
         pointsBalance: 50,
-        isOnline: true,
+        isOnline: false,
         isActive: true,
         lastKnownLat: 22.46,
         lastKnownLon: 91.97,
@@ -146,7 +134,7 @@ export class DatabaseSeeder {
         name: 'Abdul Karim',
         phone: '+8801712345002',
         pointsBalance: 75,
-        isOnline: true,
+        isOnline: false,
         isActive: true,
         lastKnownLat: 22.36,
         lastKnownLon: 91.83,
@@ -164,7 +152,7 @@ export class DatabaseSeeder {
         name: 'Kamal Hossain',
         phone: '+8801712345004',
         pointsBalance: 90,
-        isOnline: true,
+        isOnline: false,
         isActive: true,
         lastKnownLat: 22.35,
         lastKnownLon: 91.82,
@@ -173,7 +161,7 @@ export class DatabaseSeeder {
         name: 'Shafiq Ahmed',
         phone: '+8801712345005',
         pointsBalance: 45,
-        isOnline: true,
+        isOnline: false,
         isActive: true,
         lastKnownLat: 22.332,
         lastKnownLon: 91.8136,

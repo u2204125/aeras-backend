@@ -3,14 +3,20 @@ import {
   WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  SubscribeMessage,
+  MessageBody,
+  ConnectedSocket,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, forwardRef } from '@nestjs/common';
+import { RidesService } from '../rides/rides.service';
+import { PullersService } from '../pullers/pullers.service';
+import { MqttController } from './mqtt.controller';
 
 /**
  * NotificationsGateway
- * Handles WebSocket connections for Admin Panel only
- * Real-time updates and broadcasts for admin dashboard
+ * Handles WebSocket connections for Admin Panel and Puller Apps
+ * Real-time updates and bidirectional communication
  */
 @Injectable()
 @WebSocketGateway({
@@ -22,20 +28,201 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
   @WebSocketServer()
   server: Server;
 
+  // Store connected pullers for targeted messaging
+  private connectedPullers: Map<number, string> = new Map(); // pullerId -> socketId
+
+  constructor(
+    @Inject(forwardRef(() => RidesService))
+    private ridesService: RidesService,
+    @Inject(forwardRef(() => PullersService))
+    private pullersService: PullersService,
+    @Inject(forwardRef(() => MqttController))
+    private mqttController: MqttController,
+  ) {}
+
   /**
-   * Handle admin client connection
+   * Handle client connection (admin or puller)
    */
   handleConnection(client: Socket) {
-    console.log(`🔌 Admin client connected: ${client.id}`);
-    console.log(`   Total admin connections: ${this.server.sockets.sockets.size}`);
+    console.log(`Client connected: ${client.id}`);
   }
 
   /**
-   * Handle admin client disconnection
+   * Handle client disconnection
    */
   handleDisconnect(client: Socket) {
-    console.log(`🔌 Admin client disconnected: ${client.id}`);
-    console.log(`   Total admin connections: ${this.server.sockets.sockets.size}`);
+    console.log(`Client disconnected: ${client.id}`);
+    
+    // Remove from connected pullers if it was a puller
+    for (const [pullerId, socketId] of this.connectedPullers.entries()) {
+      if (socketId === client.id) {
+        this.connectedPullers.delete(pullerId);
+        console.log(`Puller ${pullerId} disconnected`);
+        break;
+      }
+    }
+  }
+
+  /**
+   * Handle puller registration
+   * Called when puller app connects with their ID
+   */
+  @SubscribeMessage('register_puller')
+  handlePullerRegistration(
+    @MessageBody() data: { pullerId: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const { pullerId } = data;
+    this.connectedPullers.set(pullerId, client.id);
+    console.log(`✅ Puller ${pullerId} registered with socket ${client.id}`);
+    
+    return {
+      event: 'puller_registered',
+      data: { pullerId, success: true },
+    };
+  }
+
+  /**
+   * Send message to specific puller
+   */
+  sendToPuller(pullerId: number, event: string, data: any) {
+    const socketId = this.connectedPullers.get(pullerId);
+    if (socketId) {
+      this.server.to(socketId).emit(event, data);
+      console.log(`📤 Sent '${event}' to puller ${pullerId}`);
+    } else {
+      console.log(`⚠️  Puller ${pullerId} not connected via WebSocket`);
+    }
+  }
+
+  /**
+   * Handle puller accepting a ride via WebSocket
+   */
+  @SubscribeMessage('accept_ride')
+  async handleAcceptRide(
+    @MessageBody() data: { rideId: number; pullerId: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const ride = await this.ridesService.acceptRide(data.rideId, data.pullerId.toString());
+      
+      // Publish to MQTT for hardware
+      this.mqttController.publishRideStatus(ride.id, ride.status, {
+        puller: { id: ride.puller.id, name: ride.puller.name },
+      });
+      
+      return { event: 'ride_accepted', data: ride };
+    } catch (error) {
+      return { event: 'error', data: { message: error.message } };
+    }
+  }
+
+  /**
+   * Handle puller rejecting a ride via WebSocket
+   */
+  @SubscribeMessage('reject_ride')
+  async handleRejectRide(
+    @MessageBody() data: { rideId: number; pullerId: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const result = await this.ridesService.rejectRide(data.rideId, data.pullerId.toString());
+      
+      // Already publishes to MQTT in ridesService
+      return { event: 'ride_rejected', data: result };
+    } catch (error) {
+      return { event: 'error', data: { message: error.message } };
+    }
+  }
+
+  /**
+   * Handle puller confirming pickup via WebSocket
+   */
+  @SubscribeMessage('confirm_pickup')
+  async handleConfirmPickup(
+    @MessageBody() data: { rideId: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const ride = await this.ridesService.pickupRide(data.rideId);
+      
+      // Publish to MQTT for hardware
+      this.mqttController.publishRideStatus(ride.id, ride.status);
+      
+      return { event: 'pickup_confirmed', data: ride };
+    } catch (error) {
+      return { event: 'error', data: { message: error.message } };
+    }
+  }
+
+  /**
+   * Handle puller completing ride via WebSocket
+   */
+  @SubscribeMessage('complete_ride')
+  async handleCompleteRide(
+    @MessageBody() data: { rideId: number; finalLat: number; finalLon: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      const ride = await this.ridesService.completeRide(data.rideId, data.finalLat, data.finalLon);
+      
+      // Already publishes to MQTT in ridesService
+      return { event: 'ride_completed', data: ride };
+    } catch (error) {
+      return { event: 'error', data: { message: error.message } };
+    }
+  }
+
+  /**
+   * Handle puller location update via WebSocket
+   */
+  @SubscribeMessage('update_location')
+  async handleUpdateLocation(
+    @MessageBody() data: { pullerId: number; lat: number; lon: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      await this.pullersService.updateLocation(data.pullerId, data.lat, data.lon);
+      
+      // Publish to MQTT for hardware
+      this.mqttController.publish(`aeras/pullers/${data.pullerId}/location`, {
+        pullerId: data.pullerId,
+        latitude: data.lat,
+        longitude: data.lon,
+        timestamp: new Date(),
+      });
+      
+      return { event: 'location_updated', data: { success: true } };
+    } catch (error) {
+      return { event: 'error', data: { message: error.message } };
+    }
+  }
+
+  /**
+   * Handle puller status update via WebSocket
+   */
+  @SubscribeMessage('update_status')
+  async handleUpdateStatus(
+    @MessageBody() data: { pullerId: number; isOnline: boolean },
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      await this.pullersService.setOnlineStatus(data.pullerId, data.isOnline);
+      
+      // Publish to MQTT for hardware
+      this.mqttController.publish(`aeras/pullers/${data.pullerId}/status`, {
+        pullerId: data.pullerId,
+        isOnline: data.isOnline,
+        timestamp: new Date(),
+      });
+      
+      // Broadcast to admin dashboard
+      this.broadcastPullerStatusUpdate(data.pullerId, data.isOnline);
+      
+      return { event: 'status_updated', data: { success: true } };
+    } catch (error) {
+      return { event: 'error', data: { message: error.message } };
+    }
   }
 
   /**
@@ -44,7 +231,6 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
    */
   broadcastRideStatusUpdate(ride: any) {
     this.server.emit('ride_update', ride);
-    console.log(`Broadcasted ride update for ride ${ride.id}`);
 
     // Also emit activity event for activity feed
     let activityMessage = '';
@@ -92,7 +278,6 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
    */
   broadcastNotification(notification: any) {
     this.server.emit('notification', notification);
-    console.log(`� Broadcasted notification to admin clients`);
   }
 
   /**
@@ -105,8 +290,5 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
       isOnline,
       timestamp: new Date().toISOString(),
     });
-    console.log(
-      `🔄 Broadcasted puller ${pullerId} status to admin: ${isOnline ? 'ONLINE' : 'OFFLINE'}`,
-    );
   }
 }

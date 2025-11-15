@@ -2,8 +2,6 @@ import { Controller, Post, Get, Body, Param, ParseIntPipe, Query, Patch } from '
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { RidesService } from './rides.service';
 import {
-  RequestRideDto,
-  ConfirmRideDto,
   AcceptRideDto,
   CompleteRideDto,
   RejectRideDto,
@@ -13,35 +11,14 @@ import { Ride, RideStatus } from './ride.entity';
 /**
  * RidesController
  * Handles all HTTP endpoints for ride management
+ * 
+ * Note: Ride creation is handled by IoT hardware via MQTT (aeras/ride-request topic)
+ * Hardware sends { startBlockId, destinationBlockId } and backend creates the ride
  */
 @ApiTags('Rides')
 @Controller('rides')
 export class RidesController {
   constructor(private readonly ridesService: RidesService) {}
-
-  /**
-   * POST /rides/request
-   * Create a new ride request with PENDING_USER_CONFIRMATION status
-   */
-  @Post('request')
-  @ApiOperation({ summary: 'Request a new ride' })
-  @ApiResponse({ status: 201, description: 'Ride requested successfully' })
-  @ApiResponse({ status: 404, description: 'Location block not found' })
-  async requestRide(@Body() requestRideDto: RequestRideDto): Promise<Ride> {
-    return this.ridesService.requestRide(requestRideDto.blockId);
-  }
-
-  /**
-   * POST /rides/confirm
-   * Confirm a pending ride and change status to SEARCHING
-   */
-  @Post('confirm')
-  @ApiOperation({ summary: 'Confirm a pending ride' })
-  @ApiResponse({ status: 200, description: 'Ride confirmed successfully' })
-  @ApiResponse({ status: 404, description: 'No pending ride found' })
-  async confirmRide(@Body() confirmRideDto: ConfirmRideDto): Promise<Ride> {
-    return this.ridesService.confirmRide(confirmRideDto.blockId);
-  }
 
   /**
    * POST /rides/:id/accept

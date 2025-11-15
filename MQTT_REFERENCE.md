@@ -37,39 +37,52 @@ These are topics that the backend subscribes to and processes messages from IoT 
 
 ### 1. Ride Requests from Hardware
 
-**Topic Pattern:** `aeras/requests/+/+`  
-**Concrete Example:** `aeras/requests/block-1/block-5`
+**Topic:** `aeras/ride-request`
 
-**Purpose:** Hardware location blocks publish ride requests when a user initiates a ride.
-
-**Message Pattern:** `aeras/requests/{originBlockId}/{destinationBlockId}`
+**Purpose:** Hardware location blocks publish ride requests when a user initiates a ride. The hardware sends both the start block and destination block in the payload.
 
 **Payload Structure:**
 ```json
 {
-  "blockId": "block-1",
-  "destinationId": "block-5",
-  "timestamp": "2025-11-15T10:30:00.000Z",
-  "userId": "optional-user-id",
-  "priority": "normal"
+  "startBlockId": "BLOCK_001",
+  "destinationBlockId": "BLOCK_005",
+  "timestamp": "2025-11-15T10:30:00.000Z"
 }
 ```
+
+**Required Fields:**
+- `startBlockId` (string, required) - The block ID where the ride originates
+- `destinationBlockId` (string, required) - The block ID where the ride should end
+- `timestamp` (string, optional) - ISO 8601 timestamp
 
 **Handler:** `MqttController.handleHardwareRideRequest()`
 
 **Implementation:**
 ```typescript
-@MessagePattern('aeras/requests/+/+')
-handleHardwareRideRequest(@Payload() data: any) {
-  console.log('Received hardware ride request:', data);
-  // Calls RidesService to create a ride
-  return { received: true };
+@MessagePattern('aeras/ride-request')
+async handleHardwareRideRequest(@Payload() data: any) {
+  const { startBlockId, destinationBlockId } = data;
+  
+  // Creates ride directly in SEARCHING status
+  const ride = await this.ridesService.createRideFromHardware(
+    startBlockId, 
+    destinationBlockId
+  );
+  
+  return { 
+    received: true, 
+    rideId: ride.id,
+    status: ride.status 
+  };
 }
 ```
 
-**Wildcards:**
-- `+` matches single level (e.g., `block-1`, `block-2`)
-- Subscribe to `aeras/requests/#` to receive all ride requests
+**Flow:**
+1. Hardware publishes to `aeras/ride-request` with both block IDs
+2. Backend validates and creates ride in **SEARCHING** status (not PENDING_USER_CONFIRMATION)
+3. Ride is immediately broadcast to admin panel via WebSocket
+4. Ride is distributed to nearby pullers via MQTT
+5. Confirmation is sent back to hardware
 
 ---
 
@@ -122,11 +135,141 @@ handlePullerLocationUpdate(@Payload() data: any) {
 
 ---
 
+### 3. Puller Status Updates
+
+**Topic Pattern:** `aeras/pullers/+/status`  
+**Concrete Example:** `aeras/pullers/123/status`
+
+**Purpose:** Puller app publishes status updates when going online/offline or changing active state.
+
+**Message Pattern:** `aeras/pullers/{pullerId}/status`
+
+**Payload Structure:**
+```json
+{
+  "pullerId": "123",
+  "isOnline": true,
+  "isActive": true,
+  "timestamp": "2025-11-15T10:30:00.000Z"
+}
+```
+
+**Fields:**
+- `pullerId` (string, required) - Unique identifier for the puller
+- `isOnline` (boolean, required) - Whether puller is currently online
+- `isActive` (boolean, required) - Whether puller is actively accepting rides
+- `timestamp` (string, required) - ISO 8601 timestamp
+
+**Handler:** `MqttController.handlePullerStatusUpdate()`
+
+**Implementation:**
+```typescript
+@MessagePattern('aeras/pullers/+/status')
+handlePullerStatusUpdate(@Payload() data: any) {
+  console.log('Received puller status update:', data);
+  // Calls PullersService to update status in database
+  return { received: true };
+}
+```
+
+---
+
 ## Published Topics (Backend Sends)
 
-These are topics that the backend publishes to, sending commands and updates to IoT hardware.
+These are topics that the backend publishes to, sending updates to puller apps and IoT hardware.
 
-### 3. Block Status Updates
+### 4. Ride Request to Specific Puller
+
+**Topic Pattern:** `aeras/pullers/{pullerId}/ride-request`  
+**Concrete Example:** `aeras/pullers/123/ride-request`
+
+**Purpose:** Backend sends ride requests to specific pullers based on proximity and availability.
+
+**Payload Structure:**
+```json
+{
+  "rideId": 456,
+  "pickupBlock": {
+    "blockId": "block-1",
+    "name": "Dhaka University",
+    "centerLat": 23.8103,
+    "centerLon": 90.4125
+  },
+  "destinationBlock": {
+    "blockId": "block-5",
+    "name": "Shahbag",
+    "centerLat": 23.8200,
+    "centerLon": 90.4150
+  },
+  "estimatedPoints": 8,
+  "distance": 250,
+  "expiresAt": "2025-11-15T10:35:00.000Z",
+  "timestamp": "2025-11-15T10:30:00.000Z"
+}
+```
+
+**Fields:**
+- `rideId` (number, required) - Unique ride identifier
+- `pickupBlock` (object, required) - Pickup location details
+- `destinationBlock` (object, required) - Destination location details
+- `estimatedPoints` (number, required) - Points puller will earn
+- `distance` (number, optional) - Distance from puller to pickup in meters
+- `expiresAt` (string, required) - When the request expires
+- `timestamp` (string, required) - ISO 8601 timestamp
+
+**Published by:** `RidesService.distributeRideToNearbyPullers()`
+
+**Usage:** Puller app subscribes to `aeras/pullers/{pullerId}/ride-request` to receive ride notifications.
+
+---
+
+### 5. Ride Rejection Confirmation
+
+**Topic Pattern:** `aeras/pullers/{pullerId}/ride-rejected`  
+**Concrete Example:** `aeras/pullers/123/ride-rejected`
+
+**Purpose:** Backend confirms that a puller's ride rejection was recorded successfully.
+
+**Payload Structure:**
+```json
+{
+  "rideId": 456,
+  "message": "Ride rejection recorded",
+  "timestamp": "2025-11-15T10:30:00.000Z"
+}
+```
+
+**Published by:** `RidesService.rejectRide()`
+
+**Usage:** Puller app receives confirmation after rejecting a ride.
+
+---
+
+### 6. Ride Filled Notification
+
+**Topic Pattern:** `aeras/rides/{rideId}/filled`  
+**Concrete Example:** `aeras/rides/456/filled`
+
+**Purpose:** Backend notifies all pullers that a ride has been accepted by another puller and is no longer available.
+
+**Payload Structure:**
+```json
+{
+  "rideId": 456,
+  "pullerId": 123,
+  "pullerName": "John Doe",
+  "status": "ACCEPTED",
+  "timestamp": "2025-11-15T10:30:00.000Z"
+}
+```
+
+**Published by:** `RidesService.acceptRide()`
+
+**Usage:** Puller apps subscribe to `aeras/rides/+/filled` to remove filled rides from their available list.
+
+---
+
+### 7. Block Status Updates
 
 **Topic Pattern:** `aeras/blocks/{blockId}/status`  
 **Concrete Example:** `aeras/blocks/block-1/status`
@@ -180,18 +323,18 @@ mqttController.publishBlockStatus('block-1', {
 
 ---
 
-### 4. Ride Status Updates
+### 8. Ride Status Updates
 
 **Topic Pattern:** `aeras/rides/{rideId}/status`  
 **Concrete Example:** `aeras/rides/456/status`
 
-**Purpose:** Backend sends ride lifecycle status updates to hardware for display and tracking.
+**Purpose:** Backend sends ride lifecycle status updates to puller apps and hardware for tracking.
 
 **Payload Structure:**
 ```json
 {
   "rideId": 456,
-  "status": "accepted",
+  "status": "ACCEPTED",
   "timestamp": "2025-11-15T10:30:00.000Z",
   "pullerId": 123,
   "pullerName": "John Doe",
@@ -200,29 +343,167 @@ mqttController.publishBlockStatus('block-1', {
 ```
 
 **Status Values:**
-- `requested` - Ride has been requested, searching for pullers
-- `accepted` - Puller has accepted the ride
-- `in_progress` - Puller is on the way or transporting
-- `completed` - Ride has been completed successfully
-- `cancelled` - Ride was cancelled
+- `PENDING_USER_CONFIRMATION` - Ride initiated, waiting for user
+- `SEARCHING` - Looking for available pullers
+- `ACCEPTED` - Puller accepted the ride
+- `ACTIVE` - Ride in progress (puller picked up rider)
+- `COMPLETED` - Ride successfully completed
+- `CANCELLED` - Ride was cancelled
+- `EXPIRED` - Ride expired after 1 minute with no puller acceptance
 
-**Published by:** `MqttController.publishRideStatus(rideId, status)`
+**Published by:** `MqttController.publishRideStatus(rideId, status, additionalData)`
 
-**Implementation:**
-```typescript
-publishRideStatus(rideId: number, status: string) {
-  const topic = `aeras/rides/${rideId}/status`;
-  this.client.emit(topic, { rideId, status, timestamp: new Date() }).subscribe({
-    next: () => console.log(`Published ride status to ${topic}`),
-    error: (err) => console.error(`Error publishing ride status:`, err),
-  });
+**Usage:** Puller apps subscribe to `aeras/rides/+/status` to track ride state changes.
+
+---
+
+### 9. Ride Completion Notification
+
+**Topic Pattern:** `aeras/rides/{rideId}/completed`  
+**Concrete Example:** `aeras/rides/456/completed`
+
+**Purpose:** Backend notifies about completed rides with points awarded and final details.
+
+**Payload Structure:**
+```json
+{
+  "rideId": 456,
+  "status": "COMPLETED",
+  "pointsAwarded": 8,
+  "pullerId": 123,
+  "distanceFromDestination": 25,
+  "timestamp": "2025-11-15T10:30:00.000Z"
 }
 ```
 
-**Usage Example:**
-```typescript
-mqttController.publishRideStatus(456, 'accepted');
+**Fields:**
+- `rideId` (number, required) - Unique ride identifier
+- `status` (string, required) - Always "COMPLETED"
+- `pointsAwarded` (number, required) - Points earned by puller
+- `pullerId` (number, required) - Puller who completed the ride
+- `distanceFromDestination` (number, optional) - Final distance from destination in meters
+- `timestamp` (string, required) - ISO 8601 timestamp
+
+**Published by:** `RidesService.completeRide()`
+
+**Usage:** Puller app can display completion details and update points balance.
+
+---
+
+### 10. Ride Expiration Notification
+
+**Topic Pattern:** `aeras/pullers/{pullerId}/ride-expired`  
+**Concrete Example:** `aeras/pullers/123/ride-expired`
+
+**Purpose:** Backend notifies pullers that a ride they were offered has expired due to no acceptance within the timeout period (1 minute).
+
+**Payload Structure:**
+```json
+{
+  "rideId": 456,
+  "status": "EXPIRED",
+  "message": "Ride expired - no puller accepted within timeout",
+  "timestamp": "2025-11-15T10:30:00.000Z"
+}
 ```
+
+**Fields:**
+- `rideId` (number, required) - Unique ride identifier
+- `status` (string, required) - Always "EXPIRED"
+- `message` (string, required) - Expiration reason
+- `timestamp` (string, required) - ISO 8601 timestamp
+
+**Published by:** `RidesService.autoExpireRide()` (called automatically after 1 minute)
+
+**Auto-Expiration Logic:**
+- Triggered 60 seconds after ride creation
+- Only applies if ride status is still SEARCHING
+- Broadcasts to all online pullers via MQTT
+- Broadcasts to admin dashboard via WebSocket
+- Publishes status update to MQTT broker for hardware
+
+**Usage:** Puller app should remove expired rides from available list and stop showing notifications.
+
+---
+
+### 11. Puller Login Notification
+
+**Topic Pattern:** `aeras/pullers/{pullerId}/login`  
+**Concrete Example:** `aeras/pullers/123/login`
+
+**Purpose:** Backend publishes puller details to MQTT broker when a puller logs in. This allows hardware to display puller information.
+
+**Payload Structure:**
+```json
+{
+  "pullerId": 123,
+  "name": "John Doe",
+  "phone": "+8801712345678",
+  "pointsBalance": 150,
+  "isOnline": true,
+  "isActive": true,
+  "timestamp": "2025-11-15T10:30:00.000Z"
+}
+```
+
+**Fields:**
+- `pullerId` (number, required) - Unique puller identifier
+- `name` (string, required) - Puller's name
+- `phone` (string, required) - Puller's phone number
+- `pointsBalance` (number, required) - Current points balance
+- `isOnline` (boolean, required) - Current online status
+- `isActive` (boolean, required) - Whether account is active
+- `timestamp` (string, required) - ISO 8601 timestamp
+
+**Published by:** `AuthService.loginPuller()`
+
+**Flow:**
+1. Puller app sends login request via HTTP API
+2. Backend validates and fetches puller data from database
+3. Backend publishes puller data to MQTT topic
+4. Hardware receives puller details
+5. Backend returns puller data + JWT token to app
+6. Puller app connects to WebSocket for all subsequent actions
+
+**Usage:** Hardware can display puller name, phone, and points on login.
+
+---
+
+## Topic Summary for Puller App
+
+**HTTP API (Used Only for Login & Data Fetching):**
+- `POST /auth/puller/login` - Initial authentication with phone number
+- `GET /pullers/{id}` - Fetch puller details
+- `GET /pullers/{id}/rides` - Fetch ride history
+- `GET /rides` - Fetch available rides
+
+**WebSocket Events (Used for All Actions After Login):**
+- `register_puller` - Register puller connection with backend
+- `accept_ride` - Accept a ride request
+- `reject_ride` - Reject a ride request
+- `confirm_pickup` - Confirm passenger pickup
+- `complete_ride` - Complete a ride
+- `update_location` - Update GPS location
+- `update_status` - Update online/offline status
+
+**Subscribed MQTT Topics (Puller App Listens via MQTT Service):**
+- `aeras/pullers/{pullerId}/ride-request` - New ride requests from backend
+- `aeras/pullers/{pullerId}/ride-rejected` - Rejection confirmations
+- `aeras/pullers/{pullerId}/ride-expired` - Ride expiration notifications
+- `aeras/rides/+/filled` - Rides filled by other pullers
+- `aeras/rides/+/status` - Ride status updates
+
+**Published MQTT Topics (Backend Publishes for Hardware):**
+- `aeras/pullers/{pullerId}/login` - Puller login data (name, phone, points)
+- `aeras/pullers/{pullerId}/location` - GPS location updates
+- `aeras/pullers/{pullerId}/status` - Online/offline status
+- `aeras/rides/{rideId}/status` - Ride lifecycle updates
+
+**Communication Flow:**
+1. **Login**: HTTP API → Backend validates → Publishes to MQTT → Returns JWT + data
+2. **Post-Login**: WebSocket connection established → Backend registered
+3. **Actions**: WebSocket events → Backend processes → Publishes to MQTT for hardware
+4. **Ride Notifications**: MQTT messages → Puller app receives via MQTT service
 
 ---
 
@@ -237,14 +518,9 @@ mqttController.publishRideStatus(456, 'accepted');
 
 2. **Subscribe to Topics:**
 
-   **All ride requests:**
+   **Ride requests from hardware:**
    ```
-   Topic: aeras/requests/#
-   ```
-
-   **Specific block requests:**
-   ```
-   Topic: aeras/requests/block-1/+
+   Topic: aeras/ride-request
    ```
 
    **All puller locations:**
@@ -274,13 +550,13 @@ mqttController.publishRideStatus(456, 'accepted');
 
 3. **Publish Test Messages:**
 
-   **Simulate ride request:**
+   **Simulate ride request from hardware:**
    ```
-   Topic: aeras/requests/block-1/block-5
+   Topic: aeras/ride-request
    Payload:
    {
-     "blockId": "block-1",
-     "destinationId": "block-5",
+     "startBlockId": "BLOCK_001",
+     "destinationBlockId": "BLOCK_005",
      "timestamp": "2025-11-15T10:30:00.000Z"
    }
    ```
@@ -306,7 +582,7 @@ mosquitto_sub -h broker.hivemq.com -p 1883 -t "aeras/#" -v
 
 **Subscribe to ride requests only:**
 ```bash
-mosquitto_sub -h broker.hivemq.com -p 1883 -t "aeras/requests/#" -v
+mosquitto_sub -h broker.hivemq.com -p 1883 -t "aeras/ride-request" -v
 ```
 
 **Subscribe to puller locations only:**
@@ -316,11 +592,11 @@ mosquitto_sub -h broker.hivemq.com -p 1883 -t "aeras/pullers/+/location" -v
 
 ### Using mosquitto_pub CLI
 
-**Publish a test ride request:**
+**Publish a test ride request from hardware:**
 ```bash
 mosquitto_pub -h broker.hivemq.com -p 1883 \
-  -t "aeras/requests/block-1/block-5" \
-  -m '{"blockId":"block-1","destinationId":"block-5","timestamp":"2025-11-15T10:30:00.000Z"}'
+  -t "aeras/ride-request" \
+  -m '{"startBlockId":"BLOCK_001","destinationBlockId":"BLOCK_005","timestamp":"2025-11-15T10:30:00.000Z"}'
 ```
 
 **Publish a test location update:**
@@ -336,17 +612,23 @@ mosquitto_pub -h broker.hivemq.com -p 1883 \
 
 | Topic Pattern | Direction | QoS | Purpose | Handler/Publisher |
 |--------------|-----------|-----|---------|-------------------|
-| `aeras/requests/{blockId}/{destId}` | Hardware → Backend | 0 | Ride requests from blocks | `handleHardwareRideRequest()` |
-| `aeras/pullers/{pullerId}/location` | Hardware → Backend | 0 | GPS location updates | `handlePullerLocationUpdate()` |
+| `aeras/ride-request` | Hardware → Backend | 1 | Ride requests from hardware with start & destination | `handleHardwareRideRequest()` |
+| `aeras/pullers/{pullerId}/location` | Puller App → Backend | 1 | GPS location updates | `handlePullerLocationUpdate()` |
+| `aeras/pullers/{pullerId}/status` | Puller App → Backend | 1 | Online/offline status | `handlePullerStatusUpdate()` |
+| `aeras/pullers/{pullerId}/ride-request` | Backend → Puller App | 1 | New ride requests | `distributeRideToNearbyPullers()` |
+| `aeras/pullers/{pullerId}/ride-rejected` | Backend → Puller App | 1 | Rejection confirmations | `rejectRide()` |
+| `aeras/pullers/{pullerId}/ride-expired` | Backend → Puller App | 1 | Ride expiration notifications (1 min timeout) | `autoExpireRide()` |
+| `aeras/rides/{rideId}/filled` | Backend → Puller App | 1 | Ride filled notifications | `acceptRide()` |
+| `aeras/rides/{rideId}/status` | Backend → Puller App/Hardware | 1 | Ride lifecycle updates | `publishRideStatus()` |
+| `aeras/rides/{rideId}/completed` | Backend → All | 1 | Ride completion details | `completeRide()` |
 | `aeras/blocks/{blockId}/status` | Backend → Hardware | 0 | Block status/LED control | `publishBlockStatus()` |
-| `aeras/rides/{rideId}/status` | Backend → Hardware | 0 | Ride lifecycle updates | `publishRideStatus()` |
 
 **QoS Levels:**
 - QoS 0: At most once delivery (fire and forget)
 - QoS 1: At least once delivery (with acknowledgment)
 - QoS 2: Exactly once delivery (highest reliability)
 
-*Current implementation uses QoS 0 for all topics.*
+*Puller app uses QoS 1 for reliability. Hardware uses QoS 0 for simplicity.*
 
 ---
 
@@ -358,17 +640,17 @@ MQTT supports two wildcard characters:
 Matches exactly one level in the topic hierarchy.
 
 **Examples:**
-- `aeras/requests/+/block-5` - Matches any origin block to block-5
 - `aeras/pullers/+/location` - Matches location for any puller
 - `aeras/blocks/+/status` - Matches status for any block
+- `aeras/rides/+/filled` - Matches filled notification for any ride
 
 ### Multi-level Wildcard (`#`)
 Matches any number of levels in the topic hierarchy. Must be the last character.
 
 **Examples:**
 - `aeras/#` - Matches ALL topics under aeras
-- `aeras/requests/#` - Matches all ride requests
 - `aeras/pullers/#` - Matches all puller topics
+- `aeras/rides/#` - Matches all ride-related topics
 
 ---
 
@@ -508,6 +790,24 @@ Keep messages under 256KB for optimal performance.
 ---
 
 ## Changelog
+
+### Version 1.2 - November 15, 2025
+- **New Feature:** Auto-expiration of rides after 1 minute with no puller acceptance
+- Added new MQTT topic: `aeras/pullers/{pullerId}/ride-expired`
+- Rides in SEARCHING status automatically expire after 60 seconds
+- Expiration broadcasts to all online pullers via MQTT
+- Expiration updates sent to admin panel via WebSocket
+- Expiration status published to MQTT broker for hardware
+- Added `EXPIRED` to ride status enum
+
+### Version 1.1 - November 15, 2025
+- **Breaking Change:** Simplified ride request topic from `aeras/requests/{blockId}/{destId}` to `aeras/ride-request`
+- Hardware now sends both `startBlockId` and `destinationBlockId` in payload
+- Rides are created directly in SEARCHING status (skipping PENDING_USER_CONFIRMATION)
+- Removed `/rides/request` and `/rides/confirm` REST endpoints
+- Ride creation is now exclusively via MQTT from hardware
+- Added WebSocket broadcast to admin panel on ride creation
+- Improved ride distribution to nearby pullers
 
 ### Version 1.0 - November 15, 2025
 - Initial MQTT topics documentation

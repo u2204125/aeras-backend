@@ -56,7 +56,6 @@ export class RidesService {
 
     // Broadcast ride status update to admin dashboard
     this.notificationsGateway.broadcastRideStatusUpdate(savedRide);
-    console.log(`📢 Broadcasted new ride request ${savedRide.id} to admin dashboard`);
 
     // Publish to MQTT topic for hardware/IoT devices
     const mqttPayload = {
@@ -68,9 +67,66 @@ export class RidesService {
     };
     this.mqttController.publishRideStatus(savedRide.id, savedRide.status);
     this.mqttController.publish(`aeras/requests/${blockId}/new`, mqttPayload);
-    console.log(
-      `📡 Published ride request ${savedRide.id} to MQTT topic: aeras/requests/${blockId}/new`,
-    );
+
+    return savedRide;
+  }
+
+  /**
+   * Create ride directly from hardware with both start and destination blocks
+   * Called when IoT hardware sends ride request with complete data
+   * Immediately sets status to SEARCHING and distributes to nearby pullers
+   * Sets auto-expiration timeout for 1 minute
+   */
+  async createRideFromHardware(startBlockId: string, destinationBlockId: string): Promise<Ride> {
+    // Find start block
+    const startBlock = await this.locationBlocksRepository.findOne({
+      where: { blockId: startBlockId },
+    });
+
+    if (!startBlock) {
+      throw new NotFoundException(`Start block ${startBlockId} not found`);
+    }
+
+    // Find destination block
+    const destinationBlock = await this.locationBlocksRepository.findOne({
+      where: { blockId: destinationBlockId },
+    });
+
+    if (!destinationBlock) {
+      throw new NotFoundException(`Destination block ${destinationBlockId} not found`);
+    }
+
+    // Create ride directly in SEARCHING status
+    const ride = this.ridesRepository.create({
+      startBlock,
+      destinationBlock,
+      status: RideStatus.SEARCHING,
+      requestTime: new Date(),
+    });
+
+    const savedRide = await this.ridesRepository.save(ride);
+
+    console.log(`🚗 Ride ${savedRide.id} created: ${startBlock.destinationName} → ${destinationBlock.destinationName}`);
+
+    // Broadcast to admin dashboard via WebSocket
+    this.notificationsGateway.broadcastRideStatusUpdate(savedRide);
+    console.log(`📢 Broadcasted ride ${savedRide.id} to admin dashboard`);
+
+    // Publish to MQTT for hardware confirmation
+    // this.mqttController.publishRideStatus(savedRide.id, savedRide.status, {
+    //   startBlock: { blockId: startBlock.blockId, name: startBlock.destinationName },
+    //   destinationBlock: { blockId: destinationBlock.blockId, name: destinationBlock.destinationName },
+    // });
+
+    // Distribute to nearby pullers via MQTT and WebSocket
+    await this.distributeRideToNearbyPullers(savedRide);
+
+    // Set auto-expiration timeout for 1 minute (60000 ms)
+    setTimeout(async () => {
+      await this.autoExpireRide(savedRide.id);
+    }, 60000);
+
+    console.log(`⏰ Auto-expiration timer set for ride ${savedRide.id} (1 minute)`);
 
     return savedRide;
   }
@@ -79,30 +135,37 @@ export class RidesService {
    * Confirm a pending ride and change status to SEARCHING
    * Triggers ride distribution to nearby pullers
    */
-  async confirmRide(blockId: string): Promise<Ride> {
+  async confirmRide(rideId: number, destinationBlockId: string): Promise<Ride> {
     const ride = await this.ridesRepository.findOne({
       where: {
-        startBlock: { blockId },
+        id: rideId,
         status: RideStatus.PENDING_USER_CONFIRMATION,
       },
-      order: { requestTime: 'DESC' },
       relations: ['startBlock', 'destinationBlock'],
     });
 
     if (!ride) {
-      throw new NotFoundException(`No pending ride found for block ${blockId}`);
+      throw new NotFoundException(`No pending ride found with ID ${rideId}`);
     }
 
+    // Find and update the destination block
+    const destinationBlock = await this.locationBlocksRepository.findOne({
+      where: { blockId: destinationBlockId },
+    });
+
+    if (!destinationBlock) {
+      throw new NotFoundException(`Destination block ${destinationBlockId} not found`);
+    }
+
+    ride.destinationBlock = destinationBlock;
     ride.status = RideStatus.SEARCHING;
     const savedRide = await this.ridesRepository.save(ride);
 
     // Broadcast ride status update to admin dashboard
     this.notificationsGateway.broadcastRideStatusUpdate(savedRide);
-    console.log(`📢 Broadcasted ride ${savedRide.id} status change to SEARCHING`);
 
     // Publish to MQTT topic
     this.mqttController.publishRideStatus(savedRide.id, savedRide.status);
-    console.log(`📡 Published ride ${savedRide.id} status to MQTT: SEARCHING`);
 
     // Trigger ride distribution logic
     await this.distributeRideToNearbyPullers(savedRide);
@@ -120,7 +183,6 @@ export class RidesService {
     });
 
     if (onlinePullers.length === 0) {
-      console.log('No online pullers available');
       return;
     }
 
@@ -137,10 +199,6 @@ export class RidesService {
         ),
       }))
       .sort((a, b) => a.distance - b.distance);
-
-    console.log(
-      `📢 Distributing ride ${ride.id} to ${pullersWithDistance.length} online pullers via MQTT`,
-    );
 
     // Notify top N closest pullers via MQTT
     const maxPullersToNotify = 10;
@@ -168,13 +226,73 @@ export class RidesService {
         timestamp: new Date(),
       };
 
-      // Publish to MQTT topic for specific puller
-      this.mqttController.publish(`aeras/pullers/${puller.id}/ride-request`, rideRequest);
-
-      console.log(
-        `  📡 Published ride request to puller ${puller.id} (${puller.name}) - ${Math.round(distance)}m away`,
-      );
+      // Publish to MQTT topic for specific puller using new method
+      this.mqttController.publishRideRequest(puller.id, rideRequest);
     });
+  }
+
+  /**
+   * Auto-expire ride if not accepted within timeout period
+   * Called by setTimeout after ride creation
+   */
+  private async autoExpireRide(rideId: number): Promise<void> {
+    try {
+      // Fetch the ride with current status
+      const ride = await this.ridesRepository.findOne({
+        where: { id: rideId },
+        relations: ['startBlock', 'destinationBlock', 'puller'],
+      });
+
+      // Only expire if still in SEARCHING status (not yet accepted)
+      if (!ride) {
+        console.log(`⚠️  Ride ${rideId} not found for auto-expiration`);
+        return;
+      }
+
+      if (ride.status !== RideStatus.SEARCHING) {
+        console.log(`✓ Ride ${rideId} already ${ride.status}, skipping auto-expiration`);
+        return;
+      }
+
+      // Update ride status to EXPIRED
+      ride.status = RideStatus.EXPIRED;
+      const expiredRide = await this.ridesRepository.save(ride);
+
+      console.log(`⏰ Ride ${rideId} auto-expired after 1 minute (no puller acceptance)`);
+
+      // Broadcast to admin dashboard via WebSocket
+      this.notificationsGateway.broadcastRideStatusUpdate(expiredRide);
+      console.log(`📢 Broadcasted ride ${rideId} expiration to admin dashboard`);
+
+      // Notify all nearby pullers that ride has expired via MQTT
+      const onlinePullers = await this.pullersRepository.find({
+        where: { isOnline: true, isActive: true },
+      });
+
+      onlinePullers.forEach((puller) => {
+        this.mqttController.publishRideExpired(rideId, puller.id);
+      });
+
+      console.log(`📡 Published ride ${rideId} expiration to ${onlinePullers.length} pullers via MQTT`);
+
+      // Publish to MQTT broker for hardware
+      this.mqttController.publishRideStatus(rideId, RideStatus.EXPIRED, {
+        reason: 'No puller accepted within 1 minute',
+        startBlock: { 
+          blockId: ride.startBlock.blockId, 
+          name: ride.startBlock.destinationName 
+        },
+        destinationBlock: { 
+          blockId: ride.destinationBlock.blockId, 
+          name: ride.destinationBlock.destinationName 
+        },
+      });
+
+      console.log(`📡 Published ride ${rideId} expiration to MQTT broker`);
+
+    } catch (error) {
+      console.error(`❌ Error auto-expiring ride ${rideId}:`, error);
+    }
   }
 
   /**
@@ -246,16 +364,8 @@ export class RidesService {
       where: { isOnline: true, isActive: true },
     });
 
-    // Publish ride filled notification to MQTT
-    // Other pullers listening to ride status will know it's no longer available
-    this.mqttController.publish(`aeras/rides/${ride.id}/filled`, {
-      rideId: ride.id,
-      pullerId: puller.id,
-      pullerName: puller.name,
-      status: RideStatus.ACCEPTED,
-      timestamp: new Date(),
-    });
-    console.log(`� Published ride ${ride.id} filled notification to MQTT`);
+    // Publish ride filled notification to MQTT using new method
+    this.mqttController.publishRideFilled(ride.id, puller.id, puller.name);
 
     // Broadcast ride status update to admin dashboard
     this.notificationsGateway.broadcastRideStatusUpdate(savedRide);
@@ -265,7 +375,6 @@ export class RidesService {
       pullerId: puller.id,
       pullerName: puller.name,
     });
-    console.log(`📡 Published ride ${savedRide.id} status to MQTT: ACCEPTED by puller ${pullerId}`);
 
     return savedRide;
   }
@@ -310,18 +419,11 @@ export class RidesService {
 
       // Broadcast ride status update to admin dashboard (with rejectedByPullers info)
       this.notificationsGateway.broadcastRideStatusUpdate(ride);
-      console.log(`📢 Broadcasted ride ${ride.id} rejection by puller ${pullerId}`);
 
-      // Publish rejection to MQTT for puller confirmation
-      this.mqttController.publish(`aeras/pullers/${pullerId}/ride-rejected`, {
-        rideId: ride.id,
-        message: 'Ride rejection recorded',
-        timestamp: new Date(),
-      });
-      console.log(`📡 Published ride rejection confirmation to puller ${pullerId}`);
+      // Publish rejection confirmation to MQTT for puller using new method
+      this.mqttController.publishRideRejectionConfirmation(puller.id, ride.id);
 
       // Find next available puller and send them the request
-      await this.redistributeRideToNextPuller(ride);
 
       return {
         success: true,
@@ -344,7 +446,6 @@ export class RidesService {
     });
 
     if (onlinePullers.length === 0) {
-      console.log('No online pullers available for redistribution');
       return;
     }
 
@@ -355,7 +456,6 @@ export class RidesService {
     );
 
     if (availablePullers.length === 0) {
-      console.log('No available pullers left for this ride');
       // Could set ride to EXPIRED here if desired
       return;
     }
@@ -396,9 +496,8 @@ export class RidesService {
         timestamp: new Date(),
       };
 
-      // Publish to MQTT for next puller
-      this.mqttController.publish(`aeras/pullers/${nextPuller.id}/ride-request`, rideRequest);
-      console.log(`📡 Redistributed ride ${ride.id} to puller ${nextPuller.id} via MQTT`);
+      // Publish to MQTT for next puller using new method
+      this.mqttController.publishRideRequest(nextPuller.id, rideRequest);
     }
   }
 
@@ -426,11 +525,9 @@ export class RidesService {
 
     // Broadcast ride status update to admin dashboard
     this.notificationsGateway.broadcastRideStatusUpdate(savedRide);
-    console.log(`📢 Broadcasted ride ${savedRide.id} status change to ACTIVE`);
 
     // Publish to MQTT topic
     this.mqttController.publishRideStatus(savedRide.id, savedRide.status);
-    console.log(`📡 Published ride ${savedRide.id} status to MQTT: ACTIVE`);
 
     return savedRide;
   }
@@ -497,21 +594,16 @@ export class RidesService {
 
       // Broadcast ride status update to admin dashboard
       this.notificationsGateway.broadcastRideStatusUpdate(ride);
-      console.log(`📢 Broadcasted ride ${ride.id} completion to admin dashboard`);
 
       // Publish to MQTT topic
       this.mqttController.publishRideStatus(ride.id, ride.status);
-      const completionPayload = {
-        rideId: ride.id,
-        status: ride.status,
-        pointsAwarded: calculatedPoints,
-        pullerId: ride.puller.id,
-        distanceFromDestination: Math.round(distanceFromDestination),
-        timestamp: new Date(),
-      };
-      this.mqttController.publish(`aeras/rides/${ride.id}/completed`, completionPayload);
-      console.log(
-        `📡 Published ride ${ride.id} completion to MQTT with ${calculatedPoints} points`,
+      
+      // Publish detailed completion notification to MQTT using new method
+      this.mqttController.publishRideCompletion(
+        ride.id,
+        ride.puller.id,
+        calculatedPoints,
+        distanceFromDestination
       );
 
       return ride;

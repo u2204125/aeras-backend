@@ -5,6 +5,7 @@ import { LocationBlock } from '../entities/location-block.entity';
 import { Puller } from '../entities/puller.entity';
 import { PointsHistory } from '../entities/points-history.entity';
 import { Admin } from '../entities/admin.entity';
+import { Rider } from '../entities/rider.entity';
 import { Ride } from '../rides/ride.entity';
 
 // Load environment variables
@@ -23,7 +24,7 @@ async function main() {
     username: process.env.DB_USERNAME,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_DATABASE,
-    entities: [LocationBlock, Puller, PointsHistory, Ride, Admin],
+    entities: [LocationBlock, Puller, PointsHistory, Rider, Ride, Admin],
     synchronize: true, // Creates tables if they don't exist
   });
 

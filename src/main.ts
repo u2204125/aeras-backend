@@ -64,24 +64,10 @@ async function bootstrap() {
 
   // Start all microservices
   await app.startAllMicroservices();
-  console.log('MQTT microservice connected at:', mqttUrl);
 
   // Start HTTP server
   const port = process.env.PORT || 3000;
   await app.listen(port);
-
-  console.log(`
-  ╔═══════════════════════════════════════════════════════════╗
-  ║                                                           ║
-  ║   AERAS Backend Server is running!                       ║
-  ║                                                           ║
-  ║   🚀 Server:        http://localhost:${port}                  ║
-  ║   📚 API Docs:      http://localhost:${port}/api-docs         ║
-  ║   🔌 API Prefix:    /api/v1                               ║
-  ║   📡 MQTT:          ${mqttUrl}                ║
-  ║                                                           ║
-  ╚═══════════════════════════════════════════════════════════╝
-  `);
 }
 
 bootstrap();

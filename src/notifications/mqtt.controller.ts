@@ -2,6 +2,7 @@ import { Controller, Injectable, Inject, forwardRef, OnModuleInit } from '@nestj
 import { MessagePattern, Payload, Client, ClientMqtt, Transport } from '@nestjs/microservices';
 import { ConfigService } from '@nestjs/config';
 import { PullersService } from '../pullers/pullers.service';
+import { RidesService } from '../rides/rides.service';
 import { NotificationsGateway } from './notifications.gateway';
 
 /**
@@ -23,6 +24,8 @@ export class MqttController implements OnModuleInit {
     private configService: ConfigService,
     @Inject(forwardRef(() => PullersService))
     private pullersService: PullersService,
+    @Inject(forwardRef(() => RidesService))
+    private ridesService: RidesService,
     @Inject(forwardRef(() => NotificationsGateway))
     private notificationsGateway: NotificationsGateway,
   ) {}
@@ -30,10 +33,6 @@ export class MqttController implements OnModuleInit {
   async onModuleInit() {
     // Connect the MQTT client when module initializes
     await this.client.connect();
-    console.log(
-      '✅ MQTT Controller client connected to:',
-      process.env.MQTT_HOST || 'mqtt://broker.hivemq.com:1883',
-    );
   }
 
   /**
@@ -44,9 +43,6 @@ export class MqttController implements OnModuleInit {
     const topic = `aeras/blocks/${blockId}/status`;
 
     this.client.emit(topic, payload).subscribe({
-      next: () => {
-        console.log(`Published to ${topic}:`, payload);
-      },
       error: (err) => {
         console.error(`Error publishing to ${topic}:`, err);
       },
@@ -67,9 +63,6 @@ export class MqttController implements OnModuleInit {
     };
 
     this.client.emit(topic, payload).subscribe({
-      next: () => {
-        console.log(`Published ride status to ${topic}:`, payload);
-      },
       error: (err) => {
         console.error(`Error publishing ride status:`, err);
       },
@@ -77,16 +70,162 @@ export class MqttController implements OnModuleInit {
   }
 
   /**
-   * Listen to ride requests from hardware
-   * Topic pattern: aeras/requests/{blockId}/{destinationId}
+   * Publish ride request to specific puller
    */
-  @MessagePattern('aeras/requests/+/+')
-  handleHardwareRideRequest(@Payload() data: any) {
-    console.log('Received hardware ride request:', data);
+  publishRideRequest(pullerId: number, rideRequest: any) {
+    const topic = `aeras/pullers/${pullerId}/ride-request`;
 
-    // This would typically call RidesService to create a ride
-    // For now, just logging
-    return { received: true };
+    this.client.emit(topic, rideRequest).subscribe({
+      error: (err) => {
+        console.error(`Error publishing ride request to puller ${pullerId}:`, err);
+      },
+    });
+  }
+
+  /**
+   * Publish ride filled notification
+   */
+  publishRideFilled(rideId: number, pullerId: number, pullerName: string) {
+    const topic = `aeras/rides/${rideId}/filled`;
+
+    const payload = {
+      rideId,
+      pullerId,
+      pullerName,
+      status: 'ACCEPTED',
+      timestamp: new Date(),
+    };
+
+    this.client.emit(topic, payload).subscribe({
+      error: (err) => {
+        console.error(`Error publishing ride filled notification:`, err);
+      },
+    });
+  }
+
+  /**
+   * Publish ride rejection confirmation to specific puller
+   */
+  publishRideRejectionConfirmation(pullerId: number, rideId: number) {
+    const topic = `aeras/pullers/${pullerId}/ride-rejected`;
+
+    const payload = {
+      rideId,
+      message: 'Ride rejection recorded',
+      timestamp: new Date(),
+    };
+
+    this.client.emit(topic, payload).subscribe({
+      error: (err) => {
+        console.error(`Error publishing ride rejection confirmation:`, err);
+      },
+    });
+  }
+
+  /**
+   * Publish ride completion details
+   */
+  publishRideCompletion(rideId: number, pullerId: number, pointsAwarded: number, distanceFromDestination?: number) {
+    const topic = `aeras/rides/${rideId}/completed`;
+
+    const payload = {
+      rideId,
+      status: 'COMPLETED',
+      pointsAwarded,
+      pullerId,
+      distanceFromDestination: distanceFromDestination ? Math.round(distanceFromDestination) : undefined,
+      timestamp: new Date(),
+    };
+
+    this.client.emit(topic, payload).subscribe({
+      error: (err) => {
+        console.error(`Error publishing ride completion:`, err);
+      },
+    });
+  }
+
+  /**
+   * Publish ride expiration notification to specific puller
+   * Notifies puller that a ride they were offered has expired
+   */
+  publishRideExpired(rideId: number, pullerId: number) {
+    const topic = `aeras/pullers/${pullerId}/ride-expired`;
+
+    const payload = {
+      rideId,
+      status: 'EXPIRED',
+      message: 'Ride expired - no puller accepted within timeout',
+      timestamp: new Date(),
+    };
+
+    this.client.emit(topic, payload).subscribe({
+      error: (err) => {
+        console.error(`Error publishing ride expiration to puller ${pullerId}:`, err);
+      },
+    });
+  }
+
+  /**
+   * Publish puller login data to MQTT
+   * Notifies hardware that a puller has logged in
+   */
+  publishPullerLogin(pullerId: number, pullerData: any) {
+    const topic = `aeras/pullers/${pullerId}/login`;
+
+    const payload = {
+      pullerId,
+      name: pullerData.name,
+      phone: pullerData.phone,
+      pointsBalance: pullerData.pointsBalance,
+      isOnline: pullerData.isOnline,
+      timestamp: new Date(),
+    };
+
+    this.client.emit(topic, payload).subscribe({
+      error: (err) => {
+        console.error(`Error publishing puller login to MQTT:`, err);
+      },
+    });
+  }
+
+  /**
+   * Listen to ride requests from hardware
+   * Topic: aeras/ride-request
+   * Payload: { startBlockId: string, destinationBlockId: string }
+   * 
+   * Hardware sends both start and destination blocks
+   * Backend creates ride and broadcasts to pullers and admin panel via WebSocket
+   */
+  @MessagePattern('aeras/ride-request')
+  async handleHardwareRideRequest(@Payload() data: any) {
+    try {
+      console.log('📡 Received hardware ride request:', data);
+      
+      const { blockId, destinationId } = data;
+
+      if (!blockId || !destinationId) {
+        console.error('❌ Invalid ride request data - missing block IDs');
+        return { received: false, error: 'Missing blockId or destinationId' };
+      }
+
+      console.log(`✅ Processing ride request: ${blockId} → ${destinationId}`);
+      
+      // Create ride directly in SEARCHING status with both blocks
+      const ride = await this.ridesService.createRideFromHardware(blockId, destinationId);
+      
+      console.log(`✅ Ride created: ID ${ride.id}, broadcasting to pullers and admin panel`);
+      
+      return { 
+        received: true, 
+        rideId: ride.id,
+        status: ride.status,
+        blockId, 
+        destinationId 
+      };
+    } catch (error) {
+      console.error('❌ Error handling hardware ride request:', error);
+      return { received: false, error: error.message };
+    }
   }
 
   /**
@@ -103,15 +242,8 @@ export class MqttController implements OnModuleInit {
         return { received: false, error: 'Invalid data' };
       }
 
-      console.log(`📍 Received location update from puller ${pullerId}:`, {
-        lat: latitude,
-        lon: longitude,
-      });
-
       // Update puller location in database
       await this.pullersService.updateLocation(parseInt(pullerId), latitude, longitude);
-
-      console.log(`✅ Updated location for puller ${pullerId} in database`);
 
       // Broadcast location update to admin dashboard
       this.notificationsGateway.server.emit('puller_location_update', {
@@ -142,15 +274,8 @@ export class MqttController implements OnModuleInit {
         return { received: false, error: 'Invalid data' };
       }
 
-      console.log(`🔄 Received status update from puller ${pullerId}:`, {
-        isOnline,
-        isActive,
-      });
-
       // Update puller status in database
       await this.pullersService.setOnlineStatus(parseInt(pullerId), isOnline);
-
-      console.log(`✅ Updated status for puller ${pullerId} in database`);
 
       // Broadcast status to admin dashboard
       this.notificationsGateway.broadcastPullerStatusUpdate(parseInt(pullerId), isOnline);
@@ -167,9 +292,6 @@ export class MqttController implements OnModuleInit {
    */
   publish(topic: string, message: any) {
     this.client.emit(topic, message).subscribe({
-      next: () => {
-        console.log(`Published to ${topic}:`, message);
-      },
       error: (err) => {
         console.error(`Error publishing to ${topic}:`, err);
       },
