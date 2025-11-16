@@ -1,14 +1,24 @@
-import { IsString, IsNotEmpty, IsNumber } from 'class-validator';
+import { IsString, IsNotEmpty, IsNumber, IsOptional } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 /**
  * DTO for accepting a ride (used by pullers)
  */
 export class AcceptRideDto {
-  @ApiProperty({ description: 'The ID of the puller accepting the ride' })
+  @ApiProperty({ description: 'The ID of the starting location block' })
   @IsString()
   @IsNotEmpty()
-  pullerId: string;
+  startBlockId: string;
+
+  @ApiProperty({ description: 'The ID of the destination location block' })
+  @IsString()
+  @IsNotEmpty()
+  destinationBlockId: string;
+
+  @ApiProperty({ description: 'The ID of the puller accepting the ride' })
+  @IsNumber()
+  @IsNotEmpty()
+  pullerId: number;
 }
 
 /**
@@ -24,6 +34,11 @@ export class CompleteRideDto {
   @IsNumber()
   @IsNotEmpty()
   finalLon: number;
+
+  @ApiProperty({ description: 'Optional override for points to award to the puller', required: false })
+  @IsOptional()
+  @IsNumber()
+  pointsOverride?: number;
 }
 
 /**

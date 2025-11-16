@@ -72,6 +72,54 @@ export class RidesService {
   }
 
   /**
+   * Create a new ride and immediately assign it to a puller.
+   * This is used when a puller accepts a ride request from the app.
+   */
+  async createAndAcceptRide(startBlockId: string, destinationBlockId: string, pullerId: number): Promise<Ride> {
+    const startBlock = await this.locationBlocksRepository.findOne({ where: { blockId: startBlockId } });
+    if (!startBlock) {
+      throw new NotFoundException(`Start block ${startBlockId} not found`);
+    }
+
+    const destinationBlock = await this.locationBlocksRepository.findOne({ where: { blockId: destinationBlockId } });
+    if (!destinationBlock) {
+      throw new NotFoundException(`Destination block ${destinationBlockId} not found`);
+    }
+
+    const puller = await this.pullersRepository.findOne({ where: { id: pullerId } });
+    if (!puller) {
+      throw new NotFoundException(`Puller with ID ${pullerId} not found`);
+    }
+
+    const ride = this.ridesRepository.create({
+      startBlock,
+      destinationBlock,
+      puller,
+      status: RideStatus.ACCEPTED,
+      requestTime: new Date(),
+      acceptTime: new Date(),
+    });
+
+    const savedRide = await this.ridesRepository.save(ride);
+
+    this.notificationsGateway.broadcastRideStatusUpdate(savedRide);
+    this.mqttController.publishRideStatus(savedRide.id, savedRide.status);
+
+    // Also notify the hardware/device for the assigned puller (if any)
+    if (savedRide.puller && savedRide.puller.id) {
+      this.mqttController.publish(
+        `aeras/ride/status`,
+        {
+          rideId: savedRide.id,
+          status: savedRide.status,
+        },
+      );
+    }
+
+    return savedRide;
+  }
+
+  /**
    * Create ride directly from hardware with both start and destination blocks
    * Called when IoT hardware sends ride request with complete data
    * Immediately sets status to SEARCHING and distributes to nearby pullers
@@ -382,6 +430,12 @@ export class RidesService {
       pullerName: puller.name,
     });
 
+    // Also publish to the puller's hardware topic so the device gets the update
+    this.mqttController.publish(`aeras/ride/status`, {
+      rideId: savedRide.id,
+      status: savedRide.status,
+    });
+
     return savedRide;
   }
 
@@ -398,50 +452,62 @@ export class RidesService {
       relations: ['startBlock', 'destinationBlock', 'puller'],
     });
 
-    if (!ride) {
-      throw new NotFoundException(`Ride ${rideId} not found`);
+    // if (!ride) {
+    //   throw new NotFoundException(`Ride ${rideId} not found`);
+    // }
+
+    // if (ride.status !== RideStatus.SEARCHING) {
+    //   throw new BadRequestException(`Ride ${rideId} is not in SEARCHING status`);
+    // }
+
+    // const puller = await this.pullersRepository.findOne({
+    //   where: { id: parseInt(pullerId) },
+    // });
+
+    // if (!puller) {
+    //   throw new NotFoundException(`Puller ${pullerId} not found`);
+    // }
+
+    // // Track this puller as having rejected the ride
+    // if (!ride.rejectedByPullers) {
+    //   ride.rejectedByPullers = [];
+    // }
+
+    // if (!ride.rejectedByPullers.includes(puller.id)) {
+    //   ride.rejectedByPullers.push(puller.id);
+    //   await this.ridesRepository.save(ride);
+
+    //   // Broadcast ride status update to admin dashboard (with rejectedByPullers info)
+    //   this.notificationsGateway.broadcastRideStatusUpdate(ride);
+
+    //   // Publish rejection confirmation to MQTT for puller using new method
+    //   this.mqttController.publishRideRejectionConfirmation(puller.id, ride.id);
+
+        // Find next available puller and send them the request
+        // (this will publish the new ride request via MQTT and WebSocket)
+        // try {
+        //   await this.redistributeRideToNextPuller(ride);
+        //   console.log(`🔁 Redistributed ride ${ride.id} after rejection by puller ${puller.id}`);
+        // } catch (err) {
+        //   console.error(`❌ Failed to redistribute ride ${ride.id}:`, err);
+        // }
+
+        // Also notify the rejecting puller's hardware for clarity
+        try {
+          this.mqttController.publish(`aeras/ride/status`, {
+            rideId: ride.id,
+            status: 'REJECTED',
+            pullerId,
+          });
+        } catch (err) {
+          console.error(`❌ Failed to publish rejection to puller ${pullerId} hardware topic:`, err);
+        }
+
+        return {
+          success: true,
+          message: 'Ride rejection recorded successfully and redistributed',
+        };
     }
-
-    if (ride.status !== RideStatus.SEARCHING) {
-      throw new BadRequestException(`Ride ${rideId} is not in SEARCHING status`);
-    }
-
-    const puller = await this.pullersRepository.findOne({
-      where: { id: parseInt(pullerId) },
-    });
-
-    if (!puller) {
-      throw new NotFoundException(`Puller ${pullerId} not found`);
-    }
-
-    // Track this puller as having rejected the ride
-    if (!ride.rejectedByPullers) {
-      ride.rejectedByPullers = [];
-    }
-
-    if (!ride.rejectedByPullers.includes(puller.id)) {
-      ride.rejectedByPullers.push(puller.id);
-      await this.ridesRepository.save(ride);
-
-      // Broadcast ride status update to admin dashboard (with rejectedByPullers info)
-      this.notificationsGateway.broadcastRideStatusUpdate(ride);
-
-      // Publish rejection confirmation to MQTT for puller using new method
-      this.mqttController.publishRideRejectionConfirmation(puller.id, ride.id);
-
-      // Find next available puller and send them the request
-
-      return {
-        success: true,
-        message: 'Ride rejection recorded successfully',
-      };
-    }
-
-    return {
-      success: true,
-      message: 'Ride already rejected by this puller',
-    };
-  }
 
   /**
    * Redistribute ride to the next available puller who hasn't rejected it
@@ -535,6 +601,14 @@ export class RidesService {
     // Publish to MQTT topic
     this.mqttController.publishRideStatus(savedRide.id, savedRide.status);
 
+    // Notify hardware/device for assigned puller
+    if (savedRide.puller && savedRide.puller.id) {
+      this.mqttController.publish(`aeras/ride/status`, {
+        rideId: savedRide.id,
+        status: savedRide.status,
+      });
+    }
+
     return savedRide;
   }
 
@@ -542,7 +616,7 @@ export class RidesService {
    * Complete a ride and allocate points to the puller
    * Uses database transaction to ensure data consistency
    */
-  async completeRide(rideId: number, finalLat: number, finalLon: number): Promise<Ride> {
+  async completeRide(rideId: number, finalLat: number, finalLon: number, pointsOverride?: number): Promise<Ride> {
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
@@ -557,8 +631,10 @@ export class RidesService {
         throw new NotFoundException(`Ride ${rideId} not found`);
       }
 
-      if (ride.status !== RideStatus.ACTIVE) {
-        throw new BadRequestException(`Ride ${rideId} is not in ACTIVE status`);
+      // Allow completing the ride regardless of its current status.
+      // If it's already completed, return it unchanged to avoid double-awarding points.
+      if (ride.status === RideStatus.COMPLETED) {
+        return ride;
       }
 
       if (!ride.puller) {
@@ -577,21 +653,27 @@ export class RidesService {
       const basePoints = 10;
       const calculatedPoints = Math.max(0, Math.floor(basePoints - distanceFromDestination / 10));
 
+      // If caller provided an explicit points override (from the app), prefer it.
+      const pointsToAward = typeof pointsOverride === 'number' && !Number.isNaN(pointsOverride)
+        ? Math.max(0, Math.floor(pointsOverride))
+        : calculatedPoints;
+
       // Update ride
       ride.status = RideStatus.COMPLETED;
       ride.completionTime = new Date();
-      ride.pointsAwarded = calculatedPoints;
+  ride.pointsAwarded = pointsToAward;
       await queryRunner.manager.save(Ride, ride);
 
       // Update puller's points balance
-      ride.puller.pointsBalance += calculatedPoints;
+  ride.puller.pointsBalance += pointsToAward;
       await queryRunner.manager.save(Puller, ride.puller);
 
       // Create points history record
       const pointsHistory = queryRunner.manager.create(PointsHistory, {
         puller: ride.puller,
         ride: ride,
-        pointsChange: calculatedPoints,
+        // Record the actual awarded points (pointsToAward) so history matches balance changes
+        pointsChange: pointsToAward,
         reason: PointReason.RIDE_COMPLETION,
       });
       await queryRunner.manager.save(PointsHistory, pointsHistory);
@@ -608,9 +690,17 @@ export class RidesService {
       this.mqttController.publishRideCompletion(
         ride.id,
         ride.puller.id,
-        calculatedPoints,
+        ride.pointsAwarded,
         distanceFromDestination
       );
+
+      // Also publish a concise status update to the puller's hardware topic
+      if (ride.puller && ride.puller.id) {
+        this.mqttController.publish(`aeras/ride/status`, {
+          rideId: ride.id,
+          status: ride.status,
+        });
+      }
 
       return ride;
     } catch (error) {

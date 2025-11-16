@@ -24,17 +24,15 @@ export class RidesController {
    * POST /rides/:id/accept
    * Assign a puller to a ride and change status to ACCEPTED
    */
-  @Post(':id/accept')
-  @ApiOperation({ summary: 'Accept a ride as a puller' })
-  @ApiParam({ name: 'id', description: 'Ride ID' })
-  @ApiResponse({ status: 200, description: 'Ride accepted successfully' })
-  @ApiResponse({ status: 404, description: 'Ride or puller not found' })
-  @ApiResponse({ status: 400, description: 'Ride not in SEARCHING status' })
+  @Post('accept')
+  @ApiOperation({ summary: 'Accept and create a new ride' })
+  @ApiResponse({ status: 201, description: 'Ride created and accepted successfully' })
+  @ApiResponse({ status: 404, description: 'Puller or location block not found' })
   async acceptRide(
-    @Param('id', ParseIntPipe) id: number,
     @Body() acceptRideDto: AcceptRideDto,
   ): Promise<Ride> {
-    return this.ridesService.acceptRide(id, acceptRideDto.pullerId);
+    const { startBlockId, destinationBlockId, pullerId } = acceptRideDto;
+    return this.ridesService.createAndAcceptRide(startBlockId, destinationBlockId, pullerId);
   }
 
   /**
@@ -82,7 +80,12 @@ export class RidesController {
     @Param('id', ParseIntPipe) id: number,
     @Body() completeRideDto: CompleteRideDto,
   ): Promise<Ride> {
-    return this.ridesService.completeRide(id, completeRideDto.finalLat, completeRideDto.finalLon);
+    return this.ridesService.completeRide(
+      id,
+      completeRideDto.finalLat,
+      completeRideDto.finalLon,
+      completeRideDto.pointsOverride,
+    );
   }
 
   /**
